@@ -2,49 +2,42 @@
 
 Zadanie polega na zainstalowaniu lekkiej dystrybucji Kubernetesa (k3s), skonfigurowaniu wdrożenia (Deployment) i usługi (Service) dla silnika `llamafile` oraz przeprowadzaniu testów bezprzerwowej aktualizacji (Rolling Update), wycofywania błędnych zmian (Rollback) i ocenie zużycia zasobów.
 
+---
+
 ## 1. Instalacja środowiska k3s i przygotowanie sekretu GHCR
 
 Rozpoczęto od instalacji lekkiego klastra k3s na systemie Debian oraz skonfigurowania poświadczeń do pobierania obrazów kontenerowych z prywatnego rejestru GitHub Packages (GHCR).
 
-* `sudo curl -sfL https://get.k3s.io | sh -`
-  Pobranie i automatyczna instalacja k3s wraz z dodaniem usługi do `systemd`.
+*   `curl -sfL https://get.k3s.io | sh -`
+    Pobranie i automatyczna instalacja k3s wraz z dodaniem usługi do `systemd`.
+*   `sudo chmod 644 /etc/rancher/k3s/k3s.yaml`
+    Nadanie odpowiednich uprawnień do pliku konfiguracyjnego k3s, aby umożliwić pracę narzędzia `kubectl`.
+*   `sudo kubectl create secret docker-registry ghcr-secret --docker-server=ghcr.io --docker-username=<TWOJ_NICK_GITHUB> --docker-password=<TOKEN_PAT> --docker-email=<EMAIL>`
+    Utworzenie sekretu w klastrze umożliwiającego Kubernetesowi autoryzowane pobieranie obrazów z organizacji GHCR.
 
-* `sudo chmod 644 /etc/rancher/k3s/k3s.yaml`
-  Nadanie odpowiednich uprawnień do pliku konfiguracyjnego k3s, aby umożliwić pracę narzędzia `kubectl`.
-
-* `sudo kubectl create secret docker-registry ghcr-secret --docker-server=ghcr.io --docker-username=<TWOJ_NICK_GITHUB> --docker-password=<TOKEN_PAT> --docker-email=<EMAIL>`
-  Utworzenie sekretu w klastrze umożliwiającego Kubernetesowi autoryzowane pobieranie obrazów z organizacji GHCR.
+---
 
 ## 2. Pliki konfiguracyjne środowiska Kubernetes
 
 W katalogu `k8s/` utworzono manifesty definiujące architekturę wdrożeniową aplikacji.
 
-### Plik `k8s/01-service.yaml` (Wystawienie usługi)
+### Plik `k8s/01-configmap.yaml` (Konfiguracja środowiska)
+Plik ten przenosi parametry konfiguracyjne z wcześniejszego pliku .env do natywnego formatu Kubernetes. Tworzy obiekt ConfigMap, z którego główne wdrożenie (Deployment) pobiera zmienne środowiskowe i wstrzykuje je bezpośrednio do kontenera. Pozwala to na elastyczne zarządzanie ustawieniami w klastrze bez konieczności modyfikowania manifestu samego Poda.
 
-Usługa typu `NodePort` udostępnia aplikację na określonym porcie maszyny wirtualnej (30080), przekierowując ruch do kontenerów z etykietą `app: llm`.
-
-```
+```yaml
 apiVersion: v1
-kind: Service
+kind: ConfigMap
 metadata:
-  name: llm-service
-spec:
-  type: NodePort
-  selector:
-    app: llm
-  ports:
-    - protocol: TCP
-      port: 8080
-      targetPort: 8080
-      nodePort: 30080
-
+  name: llm-config
+data:
+  LLAMAFILE_THREADS: "4"
+  LLAMAFILE_CONTEXT: "2048"
 ```
 
 ### Plik `k8s/02-deployment.yaml` (Wdrożenie i strategia aktualizacji)
+Manifest opisujący uruchomienie kontenera. Definiuje strategię `RollingUpdate` z parametrem `maxUnavailable: 0` oraz sondy stanu (`startupProbe`, `readinessProbe`) zapewniające płynną wymianę Podów bez przerw w działaniu.
 
-Manifest opisujący uruchomienie kontenera. Definiuje strategię `RollingUpdate` z parametrem `maxUnavailable: 0`, politykę bezpieczeństwa (zarówno na poziomie Poda, jak i kontenera), limity zasobów, hak `preStop` z opóźnieniem wyłączenia oraz sondy stanu (`startupProbe`, `readinessProbe`) zapewniające płynną wymianę Podów bez przerw w działaniu.
-
-```
+```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -128,107 +121,122 @@ spec:
         - name: tmpfs-vol
           emptyDir:
             medium: Memory
-
 ```
+
+### Plik `k8s/03-service.yaml` (Wystawienie usługi)
+Usługa typu `NodePort` udostępnia aplikację na określonym porcie maszyny wirtualnej (30080), przekierowując ruch do kontenerów z etykietą `app: llm`.
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-service
+spec:
+  type: NodePort
+  selector:
+    app: llm
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
+      nodePort: 30080
+```
+
+---
 
 ## 3. Przygotowanie i publikacja nowej wersji obrazu (GHCR)
 
 Utworzono nową etykietę (tag `v1.1`) dla zbudowanego wcześniej obrazu i wypchnięto ją do rejestru organizacji.
 
-* `sudo docker login ghcr.io -u MerLinH-0`
-  Zalogowanie demona Docker na koncie administratora do rejestru GitHub Packages z użyciem tokena Personal Access Token (PAT).
+*   `sudo docker login ghcr.io -u MerLinh-0`
+    Zalogowanie demona Docker na koncie administratora do rejestru GitHub Packages z użyciem tokena Personal Access Token (PAT).
+*   `sudo docker tag ghcr.io/eternity-mlops/mlops-marcin-z/llamafile-engine:v1 ghcr.io/eternity-mlops/mlops-marcin-z/llamafile-engine:v1.1`
+    Oznaczenie istniejącego obrazu nowym tagiem wersji `v1.1`.
+*   `sudo docker push ghcr.io/eternity-mlops/mlops-marcin-z/llamafile-engine:v1.1`
+    Wypchnięcie nowej wersji obrazu do rejestru GHCR.
 
-* `sudo docker tag ghcr.io/eternity-mlops/mlops-marcin-z/llamafile-engine:v1.0 ghcr.io/eternity-mlops/mlops-marcin-z/llamafile-engine:v1.1`
-  Oznaczenie istniejącego obrazu nowym tagiem wersji `v1.1`.
-
-* `sudo docker push ghcr.io/eternity-mlops/mlops-marcin-z/llamafile-engine:v1.1`
-  Wypchnięcie nowej wersji obrazu do rejestru GHCR.
+---
 
 ## 4. Test bezprzerwowej aktualizacji (Rolling Update)
 
 Przeprowadzono aktualizację wdrożenia z wersji `v1.0` do `v1.1` przy jednoczesnym odpytywaniu usługi w stałej pętli testowej.
 
-* **Pętla testująca dostępność HTTP:**
+*   **Pętla testująca dostępność HTTP:**
+    ```bash
+    while true; do curl --connect-timeout 1 -m 2 --retry 3 --retry-connrefused -s -o /dev/null -w "HTTP: %{http_code}\n" http://192.168.100.149:30080/health; sleep 1; done
+    ```
 
-  ```
-  while true; do curl --connect-timeout 1 -m 2 --retry 3 --retry-connrefused -s -o /dev/null -w "HTTP: %{http_code}\n" http://192.168.100.149:30080/health; sleep 1; done
-  
-  ```
+*   **Wywołanie aktualizacji obrazu:**
+    ```bash
+    sudo kubectl set image deploy/llm llm=ghcr.io/eternity-mlops/mlops-marcin-z/llamafile-engine:v1.1
+    ```
 
-* **Wywołanie aktualizacji obrazu:**
+*   **Wynik:**
+    W trakcie wymiany kontenerów w pętli odpytującej nie odnotowano ani jednego błędu połączenia (`000`) ani błędu serwera (`503`). Usługa zachowała 100% dostępności (`HTTP: 200`).
+    
+    ![Bezprzerwowa aktualizacja](continuity.png)
 
-  ```
-  sudo kubectl set image deploy/llm llm=ghcr.io/eternity-mlops/mlops-marcin-z/llamafile-engine:v1.1
-  
-  ```
-
-* **Wynik:**
-  W trakcie wymiany kontenerów w pętli odpytującej nie odnotowano ani jednego błędu połączenia (`000`) ani błędu serwera (`503`). Usługa zachowała 100% dostępności (`HTTP: 200`).
+---
 
 ## 5. Sprawdzenie działania i odporności środowiska
 
 ### Sprawdzenie dostępności REST API z maszyny gospodarza
-
 Wysłano zapytanie do punktu kontrolnego `/health` z zewnętrznej maszyny w celu weryfikacji poprawności routingu sieciowego NodePort.
 
-```
+```bash
 curl http://192.168.100.149:30080/health
-
 ```
 
-* **Odpowiedź usługi potwierdzająca prawidłowe działanie:**
-  
+*   Odpowiedź usługi potwierdzająca prawidłowe działanie:
+    
+    ![Test REST API curl](curl.png)
+
+---
 
 ### Test wycofania błędnego wdrożenia (Rollback)
-
 Przetestowano zachowanie klastra w przypadku próby wdrożenia uszkodzonego lub nieistniejącego obrazu.
 
-1. Wdrożono zepsuty tag:
+1.  Wdrożono zepsuty tag:
+    `sudo kubectl set image deploy/llm llm=ghcr.io/eternity-mlops/mlops-marcin-z/llamafile-engine:0000`
+2.  Obserwacja stanu: Nowy Pod zawiśnął w stanie `ErrImagePull`, ale stary Pod kontynuował pracę w stanie `Running`.
+3.  Cofnięcie wdrożenia:
+    `sudo kubectl rollout undo deploy/llm`
 
-   ```
-   sudo kubectl set image deploy/llm llm=ghcr.io/eternity-mlops/mlops-marcin-z/llamafile-engine:0000
-   
-   ```
+*   Potwierdzenie prawidłowej reakcji klastra i powrotu do stabilnego stanu:
+    
+    ![Test Rollbacku](rollback.png)
 
-2. Obserwacja stanu: Nowy Pod zawiśnął w stanie `ErrImagePull`, ale stary Pod kontynuował pracę w stanie `Running`.
-
-3. Cofnięcie wdrożenia:
-
-   ```
-   sudo kubectl rollout undo deploy/llm
-   
-   ```
-
-* **Potwierdzenie prawidłowej reakcji klastra i powrotu do stabilnego stanu:**
-  
+---
 
 ### Test autostartu po restarcie maszyny wirtualnej
-
 Przeprowadzono restart systemu operacyjnego w celu weryfikacji mechanizmów rezyliencji i samonaprawy k3s.
 
-1. `sudo reboot` – twardy restart maszyny wirtualnej.
+1.  `sudo reboot` – twardy restart maszyny wirtualnej.
+2.  Po ponownym połączeniu SSH wykonano `sudo kubectl get pods`.
 
-2. Po ponownym połączeniu SSH wykonano `sudo kubectl get pods`.
+*   Weryfikacja automatycznego uruchomienia kontenerów bez interwencji ręcznej:
+    
+    ![Test Reboot Autostart](reboot.png)
 
-* **Weryfikacja automatycznego uruchomienia kontenerów bez interwencji ręcznej:**
-  
+---
 
 ## 6. Metryki zasobów i tabela porównawcza
 
 Pobrano dane dotyczące zużycia procesora oraz pamięci operacyjnej za pomocą narzędzia `kubectl top`.
 
-* `sudo kubectl top pods` – zużycie zasobów przez sam kontener z modelem.
+*   `sudo kubectl top pods` – zużycie zasobów przez sam kontener z modelem.
+*   `sudo kubectl top nodes` – całkowite zużycie zasobów maszyny (uwzględniające narzut k3s).
 
-* `sudo kubectl top nodes` – całkowite zużycie zasobów maszyny (uwzględniające narzut k3s).
+![Metryki zużycia zasobów](metrics.png)
 
 ### Tabela porównawcza: Docker Compose vs Kubernetes (k3s)
 
-| Kryterium | Docker Compose (Pracownia 3) | Kubernetes k3s (Pracownia 4) | 
-| ----- | ----- | ----- | 
-| **Zużycie RAM usługi (Pod/Kontener)** | \~1.9 GB | 1969 MiB (\~1.92 GB) | 
-| **Całkowite zużycie RAM systemu** | \~2.3 GB | 3378 MiB (\~3.3 GB) | 
-| **Narzut zarządcy (Orkiestratora)** | Niski (\~100-150 MB daemon Docker) | Średni (\~1.1 GB dla procesów k3s/systemd) | 
-| **Zużycie CPU w stanie spoczynku** | \~0% | 1m (Pod) / 125m (Cały węzeł k3s) | 
-| **Bezprzerwowa aktualizacja (Rolling Update)** | Brak (wymaga ręcznego reloadu/down) | Wbudowana z natywną obsługą sond `readiness` | 
-| **Mechanizm samonaprawy i Rollback** | Podstawowy (`restart: unless-stopped`) | Zaawansowany (`kubectl rollout undo`, detekcja awarii) | 
-| **Złożoność konfiguracji** | Niska (pojedynczy plik `compose.yaml`) | Średnia/Wysoka (pliki Deployment, Service, Sekrety) | 
+| Kryterium | Docker Compose (Pracownia 3) | Kubernetes k3s (Pracownia 4) |
+| :--- | :--- | :--- |
+| **Zużycie RAM usługi (Pod/Kontener)** | ~1.9 GB | 1969 MiB (~1.92 GB) |
+| **Całkowite zużycie RAM systemu** | ~2.3 GB | 3378 MiB (~3.3 GB) |
+| **Narzut zarządcy (Orkiestratora)** | Niski (~100-150 MB daemon Docker) | Średni (~1.1 GB dla procesów k3s/systemd) |
+| **Zużycie CPU w stanie spoczynku** | ~0% | 1m (Pod) / 125m (Cały węzeł k3s) |
+| **Bezprzerwowa aktualizacja (Rolling Update)** | Brak (wymaga ręcznego reloadu/down) | Wbudowana z natywną obsługą sond `readiness` |
+| **Mechanizm samonaprawy i Rollback** | Podstawowy (`restart: unless-stopped`) | Zaawansowany (`kubectl rollout undo`, detekcja awarii) |
+| **Złożoność konfiguracji** | Niska (pojedynczy plik `compose.yaml`) | Średnia/Wysoka (pliki Deployment, Service, Sekrety) |
